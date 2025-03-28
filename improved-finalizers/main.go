@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"runtime"
+	"sync"
 	"weak"
 )
 
@@ -15,54 +16,73 @@ func (b Blob) String() string {
 // newBlob returns a new Blob of the given size in KB.
 func newBlob(size int) *Blob {
 	b := make([]byte, size*1024)
+
 	for i := range size {
 		b[i] = byte(i) % 255
 	}
+
 	return (*Blob)(&b)
 }
 
 type Cache struct {
 	cache map[string]weak.Pointer[Blob]
+	mu    *sync.Mutex
 }
 
 func NewCache() *Cache {
 	return &Cache{
 		cache: make(map[string]weak.Pointer[Blob]),
+		mu:    new(sync.Mutex),
 	}
 }
 
 // Set stores a value in the cache.
 func (c *Cache) Set(key string, value *Blob) {
+	c.mu.Lock()
 	c.cache[key] = weak.Make(value) // Store weak reference
+	c.mu.Unlock()
 
 	// Pre Go 1.24, we would have to use runtime.SetFinalizer which is notoriously hard to use,
 	// see also: https://pkg.go.dev/runtime@master#SetFinalizer
 	// ⬇️ Is where the magic 🪄 happens
 	runtime.AddCleanup(value, func(key string) {
 		// Please keep in mind, that the cleanup function is not guaranteed to run immediately
-		// after an object is garbage collected.
+		// after an object is garbage collected and it runs in a separate goroutine!
+		c.mu.Lock()
 		delete(c.cache, key)
+		c.mu.Unlock()
 	}, key)
 }
 
 // Get retrieves a value, returning nil if it's been garbage collected.
 func (c *Cache) Get(key string) *Blob {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if ptr, ok := c.cache[key]; ok {
 		return ptr.Value()
 	}
+
 	return nil
 }
 
 // Len returns the number of items in the cache.
 func (c *Cache) Len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	return len(c.cache)
 }
 
 func (c *Cache) Keys() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	keys := make([]string, 0, len(c.cache))
+
 	for key := range c.cache {
 		keys = append(keys, key)
 	}
+
 	return keys
 }
 
